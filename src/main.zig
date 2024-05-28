@@ -23,8 +23,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var app = try http.Server(&[_]http.Route{
-        .{ "/", root },
-        .{ "/greet", greet },
+        .{ "/", http.MethodCallbacks{ .get = root } },
+        .{ "/greet", http.MethodCallbacks{ .get = greet } },
     }).init(allocator, "127.0.0.1", 6969);
     defer app.deinit();
 

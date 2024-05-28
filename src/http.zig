@@ -104,15 +104,25 @@ pub const Response = struct {
     }
 };
 
+pub const MethodCallbacks = struct {
+    get: ?*const fn (Request) Response = null,
+    post: ?*const fn (Request) Response = null,
+    put: ?*const fn (Request) Response = null,
+    delete: ?*const fn (Request) Response = null,
+    // options: ?*const fn (Request) Response = null,
+    // trace: ?*const fn (Request) Response = null,
+    // connect: ?*const fn (Request) Response = null,
+};
+
 pub const Route = struct {
     /// path
     []const u8,
-    /// callback function
-    *const fn (Request) Response,
+    MethodCallbacks,
 };
 
+/// The routes are evaluated at compile time so they are taken as a paramater to the type rather than to the instance
 pub fn Server(handlers: []const Route) type {
-    const Routes = std.ComptimeStringMap(*const fn (Request) Response, handlers);
+    const Routes = std.ComptimeStringMap(MethodCallbacks, handlers);
     return struct {
         host: []const u8,
         port: u16,
@@ -148,17 +158,28 @@ pub fn Server(handlers: []const Route) type {
                 const bytesRead = try con.stream.reader().read(&readBuffer);
                 const reqRaw = readBuffer[0..bytesRead];
 
-                std.debug.print("Recieved Request:\n{s}\n", .{reqRaw});
+                std.debug.print("--Recieved Request--" ++ "-" ** 20 ++ "\n{s}\n" ++ "-" ** 40 ++ "\n", .{reqRaw});
 
                 var req = try Request.parse(self.allocator, reqRaw);
                 defer req.headers.deinit();
 
-                const res = if (Routes.get(req.path)) |handler| handler(req) else Response{ .status = Status.NotFound };
+                var methodUpper: [8]u8 = undefined;
+                const res = if (Routes.get(req.path)) |methods| res: {
+                    inline for (@typeInfo(MethodCallbacks).Struct.fields) |field| {
+                        if (mem.eql(u8, std.ascii.upperString(&methodUpper, field.name), req.method)) {
+                            break :res if (@field(methods, field.name)) |method|
+                                method(req)
+                            else
+                                Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
+                        }
+                        break :res Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
+                    }
+                } else Response{ .status = Status.NotFound };
 
                 const resSerialized = try res.serialize(self.allocator);
                 defer self.allocator.free(resSerialized);
 
-                std.debug.print("Response: {s}\n", .{resSerialized});
+                std.debug.print("--Response--" ++ "-" ** 28 ++ "\n{s}\n" ++ "-" ** 40 ++ "\n", .{resSerialized});
                 _ = try con.stream.write(resSerialized);
                 con.stream.close();
             } else |e| {
