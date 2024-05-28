@@ -1,5 +1,4 @@
 const std = @import("std");
-const mem = std.mem;
 
 const http = @import("http.zig");
 
@@ -10,10 +9,13 @@ fn root(_: http.Request) http.Response {
     };
 }
 
-fn greet(_: http.Request) http.Response {
+fn greet(req: http.Request) http.Response {
+    var buf: [64]u8 = undefined;
+    const name = if (req.params.get("name")) |name| name else "User";
+    const body = std.fmt.bufPrint(&buf, "<html>Hello {s}!</html>", .{name}) catch "<html>Name too long</html>";
     return http.Response{
         .status = http.Status.OK,
-        .body = "<html>Hello User!</html>",
+        .body = body,
     };
 }
 
@@ -25,7 +27,7 @@ pub fn main() !void {
     var app = try http.Server(&[_]http.Route{
         .{ "/", http.MethodCallbacks{ .get = root } },
         .{ "/greet", http.MethodCallbacks{ .get = greet } },
-    }).init(allocator, "127.0.0.1", 6969);
+    }).init(allocator, 6969);
     defer app.deinit();
 
     try app.listen();

@@ -10,16 +10,33 @@ pub const Request = struct {
     method: []const u8,
     path: []const u8,
     headers: std.StringArrayHashMap([]const u8),
-
+    params: std.StringArrayHashMap([]const u8),
     body: []const u8,
 
     fn parse(allocator: mem.Allocator, raw: []const u8) (mem.Allocator.Error || HttpError)!Request {
         var headers = std.StringArrayHashMap([]const u8).init(allocator);
+        var params = std.StringArrayHashMap([]const u8).init(allocator);
         var lines = mem.splitSequence(u8, raw, "\r\n");
+
         const requestLine = lines.next() orelse return HttpError.InvalidRequest;
         var rlIt = mem.tokenizeScalar(u8, requestLine, ' ');
         const method = rlIt.next() orelse return HttpError.InvalidRequest;
-        const path = rlIt.next() orelse return HttpError.InvalidRequest;
+
+        const uri = rlIt.next() orelse return HttpError.InvalidRequest;
+        var uriIt = mem.splitScalar(u8, uri, '?');
+        const path = uriIt.next().?;
+
+        const paramStr = uriIt.next();
+        if (paramStr) |p| {
+            var paramsIt = mem.splitScalar(u8, p, '&');
+            while (paramsIt.next()) |param| {
+                var pIt = mem.splitScalar(u8, param, '=');
+                const name = pIt.next() orelse return HttpError.InvalidRequest;
+                const value = pIt.next() orelse return HttpError.InvalidRequest;
+                try params.put(name, value);
+            }
+        }
+
         // ignoring the version
 
         while (lines.next()) |line| {
@@ -36,6 +53,7 @@ pub const Request = struct {
             .method = method,
             .path = path,
             .headers = headers,
+            .params = params,
             .body = body,
         };
     }
@@ -124,21 +142,19 @@ pub const Route = struct {
 pub fn Server(handlers: []const Route) type {
     const Routes = std.ComptimeStringMap(MethodCallbacks, handlers);
     return struct {
-        host: []const u8,
         port: u16,
 
         server: net.Server = undefined,
 
         allocator: mem.Allocator,
 
-        pub fn init(allocator: mem.Allocator, host: []const u8, port: u16) !@This() {
-            const loopback = try net.Ip4Address.parse(host, port);
+        pub fn init(allocator: mem.Allocator, port: u16) !@This() {
+            const loopback = try net.Ip4Address.parse("127.0.0.1", port);
             const localhost = net.Address{ .in = loopback };
             const server = try localhost.listen(.{
                 .reuse_port = true,
             });
             return @This(){
-                .host = host,
                 .port = port,
                 .server = server,
                 .allocator = allocator,
