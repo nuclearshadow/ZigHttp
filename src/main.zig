@@ -3,8 +3,18 @@ const mem = std.mem;
 
 const http = @import("http.zig");
 
-fn helloWorld(_: http.Request) http.Response {
-    return http.Response.OK("<html>Hello World!</html>");
+fn root(_: http.Request) http.Response {
+    return http.Response{
+        .status = http.Status.OK,
+        .body = "<html>Zig HTTP Server Test</html>",
+    };
+}
+
+fn greet(_: http.Request) http.Response {
+    return http.Response{
+        .status = http.Status.OK,
+        .body = "<html>Hello User!</html>",
+    };
 }
 
 pub fn main() !void {
@@ -13,7 +23,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var app = try http.Server(&[_]http.Route{
-        .{ "/", helloWorld },
+        .{ "/", root },
+        .{ "/greet", greet },
     }).init(allocator, "127.0.0.1", 6969);
     defer app.deinit();
 

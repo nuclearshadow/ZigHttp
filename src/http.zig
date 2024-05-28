@@ -19,7 +19,7 @@ pub const Request = struct {
         const requestLine = lines.next() orelse return HttpError.InvalidRequest;
         var rlIt = mem.tokenizeScalar(u8, requestLine, ' ');
         const method = rlIt.next() orelse return HttpError.InvalidRequest;
-        const uri = rlIt.next() orelse return HttpError.InvalidRequest;
+        const path = rlIt.next() orelse return HttpError.InvalidRequest;
         // ignoring the version
 
         while (lines.next()) |line| {
@@ -34,11 +34,31 @@ pub const Request = struct {
 
         return Request{
             .method = method,
-            .uri = uri,
+            .path = path,
             .headers = headers,
             .body = body,
         };
     }
+};
+
+pub const Status = struct {
+    code: u16,
+    reason: []const u8,
+
+    pub const OK = Status{
+        .code = 200,
+        .reason = "OK",
+    };
+
+    pub const NotFound = Status{
+        .code = 404,
+        .reason = "Not Found",
+    };
+
+    pub const InternalServerError = Status{
+        .code = 500,
+        .reason = "Internal Server Error",
+    };
 };
 
 pub const Header = struct {
@@ -50,16 +70,15 @@ pub const Header = struct {
 };
 
 pub const Response = struct {
-    statusCode: u16,
-    reason: []const u8,
+    status: Status,
     headers: []const Header = &[_]Header{},
 
     body: []const u8 = "",
 
     fn serialize(self: Response, allocator: mem.Allocator) ![]u8 {
         const statusLine = try std.fmt.allocPrint(allocator, "HTTP/1.1 {d} {s}\r\n", .{
-            self.statusCode,
-            self.reason,
+            self.status.code,
+            self.status.reason,
         });
         defer allocator.free(statusLine);
 
@@ -82,28 +101,6 @@ pub const Response = struct {
             headersRaw,
             body,
         });
-    }
-
-    pub fn OK(body: []const u8) Response {
-        return Response{
-            .statusCode = 200,
-            .reason = "OK",
-            .body = body,
-        };
-    }
-    pub fn NotFound(body: []const u8) Response {
-        return Response{
-            .statusCode = 404,
-            .reason = "Not Found",
-            .body = body,
-        };
-    }
-    pub fn InternalServerError(body: []const u8) Response {
-        return Response{
-            .statusCode = 500,
-            .reason = "Internal Server Error",
-            .body = body,
-        };
     }
 };
 
@@ -156,7 +153,7 @@ pub fn Server(handlers: []const Route) type {
                 var req = try Request.parse(self.allocator, reqRaw);
                 defer req.headers.deinit();
 
-                const res = if (Routes.get(req.path)) |handler| handler(req) else Response.NotFound("");
+                const res = if (Routes.get(req.path)) |handler| handler(req) else Response{ .status = Status.NotFound };
 
                 const resSerialized = try res.serialize(self.allocator);
                 defer self.allocator.free(resSerialized);
@@ -187,8 +184,7 @@ test "Resquest Parsing" {
 
 test "Response Serialization" {
     const res = Response{
-        .statusCode = 200,
-        .reason = "OK",
+        .status = Status.OK,
         .headers = &[_]Header{
             .{ "Server", "ZigHttp" },
             .{ "Content-Type", "text/html" },
