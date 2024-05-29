@@ -2,17 +2,17 @@ const std = @import("std");
 
 const http = @import("http.zig");
 
-fn root(_: http.Request) http.Response {
+fn root(_: http.Request) !http.Response {
     return http.Response{
         .status = http.Status.OK,
         .body = "<html>Zig HTTP Server Test</html>",
     };
 }
 
-fn greet(req: http.Request) http.Response {
+fn greet(req: http.Request) !http.Response {
     var buf: [64]u8 = undefined;
     const name = if (req.params.get("name")) |name| name else "User";
-    const body = std.fmt.bufPrint(&buf, "<html>Hello {s}!</html>", .{name}) catch "<html>Name too long</html>";
+    const body = try std.fmt.bufPrint(&buf, "<html>Hello {s}!</html>", .{name});
     return http.Response{
         .status = http.Status.OK,
         .body = body,

@@ -15,7 +15,9 @@ pub const Request = struct {
 
     fn parse(allocator: mem.Allocator, raw: []const u8) (mem.Allocator.Error || HttpError)!Request {
         var headers = std.StringArrayHashMap([]const u8).init(allocator);
+        errdefer headers.deinit();
         var params = std.StringArrayHashMap([]const u8).init(allocator);
+        errdefer params.deinit();
         var lines = mem.splitSequence(u8, raw, "\r\n");
 
         const requestLine = lines.next() orelse return HttpError.InvalidRequest;
@@ -123,10 +125,10 @@ pub const Response = struct {
 };
 
 pub const MethodCallbacks = struct {
-    get: ?*const fn (Request) Response = null,
-    post: ?*const fn (Request) Response = null,
-    put: ?*const fn (Request) Response = null,
-    delete: ?*const fn (Request) Response = null,
+    get: ?*const fn (Request) anyerror!Response = null,
+    post: ?*const fn (Request) anyerror!Response = null,
+    put: ?*const fn (Request) anyerror!Response = null,
+    delete: ?*const fn (Request) anyerror!Response = null,
     // options: ?*const fn (Request) Response = null,
     // trace: ?*const fn (Request) Response = null,
     // connect: ?*const fn (Request) Response = null,
@@ -184,7 +186,15 @@ pub fn Server(handlers: []const Route) type {
                     inline for (@typeInfo(MethodCallbacks).Struct.fields) |field| {
                         if (mem.eql(u8, std.ascii.upperString(&methodUpper, field.name), req.method)) {
                             break :res if (@field(methods, field.name)) |method|
-                                method(req)
+                                method(req) catch |e| {
+                                    std.debug.print("An error has occured: {}\n", .{e});
+                                    var stackTrace = @errorReturnTrace().?;
+                                    stackTrace.instruction_addresses = stackTrace.instruction_addresses[stackTrace.index - 1 ..];
+                                    stackTrace.index = 1;
+                                    // This is so it only prints the last thing from the stack trace which is the users callback function
+                                    std.debug.dumpStackTrace(stackTrace.*);
+                                    break :res Response{ .status = Status.InternalServerError };
+                                }
                             else
                                 Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
                         }
@@ -213,10 +223,9 @@ test "Resquest Parsing" {
     var req = try Request.parse(std.testing.allocator, reqRaw);
     defer req.headers.deinit();
 
-    try std.testing.expect(mem.eql(u8, req.method, "GET"));
-    try std.testing.expect(mem.eql(u8, req.path, "/"));
-    // std.debug.print("\nBody: {s}\n", .{req.body});
-    try std.testing.expect(mem.eql(u8, req.body, ""));
+    try std.testing.expectEqualStrings("GET", req.method);
+    try std.testing.expectEqualStrings("/", req.path);
+    try std.testing.expectEqualStrings("", req.body);
 }
 
 test "Response Serialization" {
@@ -238,7 +247,5 @@ test "Response Serialization" {
     const actual = try res.serialize(std.testing.allocator);
     defer std.testing.allocator.free(actual);
 
-    std.debug.print("Actual: {s}\n", .{actual});
-
-    try std.testing.expect(mem.eql(u8, actual, expected));
+    try std.testing.expectEqualStrings(expected, actual);
 }
