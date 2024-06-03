@@ -145,6 +145,7 @@ pub fn Server(handlers: []const Route) type {
     const Routes = std.ComptimeStringMap(MethodCallbacks, handlers);
     return struct {
         port: u16,
+        staticDir: ?[]const u8 = null,
 
         server: net.Server = undefined,
 
@@ -167,11 +168,20 @@ pub fn Server(handlers: []const Route) type {
             self.server.deinit();
         }
 
+        pub fn setStaticDir(self: *@This(), path: []const u8) std.posix.AccessError!void {
+            try std.fs.cwd().access(path, .{});
+            self.staticDir = path;
+        }
+
         pub fn listen(self: *@This()) !void {
             std.debug.print("Server Listening on {}\n", .{self.port});
 
             var readBuffer: [1024]u8 = undefined;
+
             while (self.server.accept()) |con| {
+                var tempSlice: ?[]u8 = null;
+                defer if (tempSlice) |slice| self.allocator.free(slice);
+
                 std.debug.print("Connection received from {}\n", .{con.address});
                 const bytesRead = try con.stream.reader().read(&readBuffer);
                 const reqRaw = readBuffer[0..bytesRead];
@@ -199,7 +209,19 @@ pub fn Server(handlers: []const Route) type {
                                 Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
                         }
                         break :res Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
+                        // TODO: Set Accept header with allowed methods for the particular path
                     }
+                } else if (self.staticDir) |dir| res: {
+                    std.debug.print("Static access\n", .{});
+                    var buf: [64]u8 = undefined;
+                    const filepath = try std.fmt.bufPrint(&buf, "{s}{s}", .{ dir, req.path });
+                    std.debug.print("{s}\n", .{filepath});
+                    const file = std.fs.cwd().openFile(filepath, .{}) catch break :res Response{ .status = Status.NotFound };
+                    defer file.close();
+
+                    tempSlice = try file.readToEndAlloc(self.allocator, 2048); // FIXME: remove max bytes somehow or make it larger
+                    // TODO: Set Content-Type Header based on file type
+                    break :res Response{ .status = Status.OK, .body = tempSlice.? };
                 } else Response{ .status = Status.NotFound };
 
                 const resSerialized = try res.serialize(self.allocator);

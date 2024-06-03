@@ -30,5 +30,7 @@ pub fn main() !void {
     }).init(allocator, 6969);
     defer app.deinit();
 
+    try app.setStaticDir("static");
+
     try app.listen();
 }
