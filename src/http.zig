@@ -125,13 +125,13 @@ pub const Response = struct {
 };
 
 pub const MethodCallbacks = struct {
-    get: ?*const fn (Request) anyerror!Response = null,
-    post: ?*const fn (Request) anyerror!Response = null,
-    put: ?*const fn (Request) anyerror!Response = null,
-    delete: ?*const fn (Request) anyerror!Response = null,
-    // options: ?*const fn (Request) Response = null,
-    // trace: ?*const fn (Request) Response = null,
-    // connect: ?*const fn (Request) Response = null,
+    get: ?*const fn (mem.Allocator, Request) anyerror!Response = null,
+    post: ?*const fn (mem.Allocator, Request) anyerror!Response = null,
+    put: ?*const fn (mem.Allocator, Request) anyerror!Response = null,
+    delete: ?*const fn (mem.Allocator, Request) anyerror!Response = null,
+    // options: ?*const fn (mem.Allocator, Request) Response = null,
+    // trace: ?*const fn (mem.Allocator, Request) Response = null,
+    // connect: ?*const fn (mem.Allocator, Request) Response = null,
 };
 
 pub const Route = struct {
@@ -141,8 +141,8 @@ pub const Route = struct {
 };
 
 /// The routes are evaluated at compile time so they are taken as a paramater to the type rather than to the instance
-pub fn Server(handlers: []const Route) type {
-    const Routes = std.ComptimeStringMap(MethodCallbacks, handlers);
+pub fn Server(comptime routes: []const Route) type {
+    const Routes = std.ComptimeStringMap(MethodCallbacks, routes);
     return struct {
         port: u16,
         staticDir: ?[]const u8 = null,
@@ -174,14 +174,11 @@ pub fn Server(handlers: []const Route) type {
         }
 
         pub fn listen(self: *@This()) !void {
-            std.debug.print("Server Listening on {}\n", .{self.port});
+            std.debug.print("Server Listening on {}...\n", .{self.port});
 
             var readBuffer: [1024]u8 = undefined;
 
             while (self.server.accept()) |con| {
-                var tempSlice: ?[]u8 = null;
-                defer if (tempSlice) |slice| self.allocator.free(slice);
-
                 std.debug.print("Connection received from {}\n", .{con.address});
                 const bytesRead = try con.stream.reader().read(&readBuffer);
                 const reqRaw = readBuffer[0..bytesRead];
@@ -191,38 +188,10 @@ pub fn Server(handlers: []const Route) type {
                 var req = try Request.parse(self.allocator, reqRaw);
                 defer req.headers.deinit();
 
-                var methodUpper: [8]u8 = undefined;
-                const res = if (Routes.get(req.path)) |methods| res: {
-                    inline for (@typeInfo(MethodCallbacks).Struct.fields) |field| {
-                        if (mem.eql(u8, std.ascii.upperString(&methodUpper, field.name), req.method)) {
-                            break :res if (@field(methods, field.name)) |method|
-                                method(req) catch |e| {
-                                    std.debug.print("An error has occured: {}\n", .{e});
-                                    var stackTrace = @errorReturnTrace().?;
-                                    stackTrace.instruction_addresses = stackTrace.instruction_addresses[stackTrace.index - 1 ..];
-                                    stackTrace.index = 1;
-                                    // This is so it only prints the last thing from the stack trace which is the users callback function
-                                    std.debug.dumpStackTrace(stackTrace.*);
-                                    break :res Response{ .status = Status.InternalServerError };
-                                }
-                            else
-                                Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
-                        }
-                        break :res Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
-                        // TODO: Set Accept header with allowed methods for the particular path
-                    }
-                } else if (self.staticDir) |dir| res: {
-                    std.debug.print("Static access\n", .{});
-                    var buf: [64]u8 = undefined;
-                    const filepath = try std.fmt.bufPrint(&buf, "{s}{s}", .{ dir, req.path });
-                    std.debug.print("{s}\n", .{filepath});
-                    const file = std.fs.cwd().openFile(filepath, .{}) catch break :res Response{ .status = Status.NotFound };
-                    defer file.close();
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
 
-                    tempSlice = try file.readToEndAlloc(self.allocator, 2048); // FIXME: remove max bytes somehow or make it larger
-                    // TODO: Set Content-Type Header based on file type
-                    break :res Response{ .status = Status.OK, .body = tempSlice.? };
-                } else Response{ .status = Status.NotFound };
+                const res = try self.getResponse(arena.allocator(), req);
 
                 const resSerialized = try res.serialize(self.allocator);
                 defer self.allocator.free(resSerialized);
@@ -232,6 +201,51 @@ pub fn Server(handlers: []const Route) type {
                 con.stream.close();
             } else |e| {
                 return e;
+            }
+        }
+
+        fn getResponse(self: @This(), allocator: mem.Allocator, req: Request) !Response {
+            if (Routes.get(req.path)) |methods| {
+                return getResponseFromCallback(allocator, methods, req);
+            } else if (self.staticDir) |dir| {
+                var buf: [64]u8 = undefined;
+                const filepath = try std.fmt.bufPrint(&buf, "{s}{s}", .{ dir, req.path });
+                const file = std.fs.cwd().openFile(filepath, .{}) catch return Response{ .status = Status.NotFound };
+                defer file.close();
+
+                const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+                // TODO: Set Content-Type Header based on file type
+                return Response{ .status = Status.OK, .body = content };
+            } else {
+                return Response{ .status = Status.NotFound };
+            }
+        }
+
+        fn getResponseFromCallback(allocator: mem.Allocator, methods: MethodCallbacks, req: Request) Response {
+            var methodUpper: [8]u8 = undefined;
+            inline for (@typeInfo(MethodCallbacks).Struct.fields) |field| {
+                if (mem.eql(u8, std.ascii.upperString(&methodUpper, field.name), req.method)) {
+                    if (@field(methods, field.name)) |methodCallback| {
+                        const res = methodCallback(allocator, req) catch |e| {
+                            std.debug.print("An error has occured: {}\n", .{e});
+                            var stackTrace = @errorReturnTrace().?;
+                            stackTrace.instruction_addresses = stackTrace.instruction_addresses[stackTrace.index - 1 ..];
+                            stackTrace.index = 1;
+                            // This is so it only prints the last thing from the stack trace which is the users callback function
+                            std.debug.dumpStackTrace(stackTrace.*);
+                            return Response{ .status = Status.InternalServerError };
+                        };
+                        std.debug.print("{s}\n", .{res.body});
+                        return res;
+                    } else {
+                        // TODO: Set Accept header with allowed methods for the particular path
+                        return Response{
+                            .status = Status{ .code = 405, .reason = "Method Not Allowed" },
+                        };
+                    }
+                }
+                // Incase when a callback for the method in request isn't even defined in the struct
+                return Response{ .status = Status{ .code = 405, .reason = "Method Not Allowed" } };
             }
         }
     };
